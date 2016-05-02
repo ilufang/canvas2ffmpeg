@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<title>Canvas 2 FFMPEG</title>
+</head>
+<body>
+<canvas width="1920" height="1080" style="background-color: black"></canvas>
+<div style="padding:1em; margin: 1em; border: 1px solid #666">
+<label>FFMPEG args: </label><input type='text' id='ff_args' style="width: 70em" placeholder="Arguments" /><br />
+<label>FFMPEG params: </label>
+<input type='number' value='30' id='ff_framerate' style="width:20em" placeholder="FPS" />
+<input type='text' value='libx264' id='ff_vcodec' style="width:20em" placeholder="Video Codec" />
+<input type='text' value='output.mp4' id='ff_output' style="width:20em" placeholder="Output filename" />
+<script type="text/javascript">
+function updateArgs() {
+	// Generate ffmpeg args
+	var	framerate = document.querySelector("#ff_framerate").value,
+		vcodec = document.querySelector("#ff_vcodec").value,
+		output = document.querySelector("#ff_output").value,
+		args = "-f image2pipe -r "+framerate+" -i - -vcodec "+vcodec+" "+output;
+	document.querySelector("#ff_args").value = args;
+	// Save preferences to localStorage if possible
+	if (window.localStorage) {
+		localStorage.framerate = framerate;
+		localStorage.vcodec = vcodec;
+		localStorage.output = output;
+	}
+}
+
+// Load preferences from localStorage if possible
+if (window.localStorage && localStorage.args) {
+	document.querySelector("#ff_framerate").value = localStorage.framerate;
+	document.querySelector("#ff_vcodec").value = localStorage.vcodec;
+	document.querySelector("#ff_output").value = localStorage.output;
+	updateArgs();
+	document.querySelector("#ff_args").value = localStorage.args;
+} else {
+	updateArgs();
+}
+</script>
+
+<button type="button" onclick="updateArgs()">Update Args</button><br />
+<button type="button" onclick="play(false)">Preview Animation</button>
+<button type="button" onclick="play(true)">Render</button><br />
+<textarea id="ff_console" style="width: 100%; height: 16em; font-family: monospace;"></textarea>
+</div>
+<script type="text/javascript" src="drawing.js"></script>
+<script type="text/javascript">
+var canvas = document.querySelector("canvas");
+var saveToFile = true; // Whether canvas data should be sent to pipe server
+var animating = false; // the 'lock'
+
+function play(save) {
+	if (animating) {
+		// Lock error.
+		alert("Animation in progress...\nPlease wait for ongoing animation to end or refresh the page.");
+		return;
+	}
+	animating = true;
+	saveToFile = save;
+	// Initialize animator
+	try {
+		Animator.init(canvas);
+	} catch(e) {
+		alert("Init script failed:\n"+e+"\nCheck console for more information");
+		console.error(e);
+		animating = false;
+	}
+	if (save) {
+		var oReq = new XMLHttpRequest();
+		oReq.open("POST", '/start');
+		oReq.onload = function(e) {
+			if (oReq.status != 200) {
+				return oReq.onerror()
+			}
+			var console = document.querySelector("#ff_console")
+			console.value += oReq.responseText;
+			console.scrollTop = console.scrollHeight;
+			// Start drawing
+			drawNext();
+		};
+		oReq.onerror = function() {
+			if (oReq.responseText) {
+				var console = document.querySelector("#ff_console")
+				console.value += oReq.responseText;
+				console.scrollTop = console.scrollHeight;
+			}
+			alert("Start failed. FFMPEG is already running.\nTry restarting nodejs");
+			animating = false;
+		}
+		oReq.send(document.querySelector("#ff_args").value);
+		// Save the args if possible
+		if (window.localStorage) {
+			localStorage.args = document.querySelector("#ff_args").value;
+		}
+	} else {
+		// Start drawing
+		drawNext();
+	}
+}
+
+function drawNext() {
+	var should_continue = false;
+	try {
+		// Draw this frame
+		should_continue = Animator.draw(canvas);
+	} catch (e) {
+		alert("Draw script failed:\n"+e+"\nCheck console for more information");
+		console.error(e);
+		animating = false;
+	}
+	if (should_continue) {
+		if (saveToFile) {
+			// Send the png blob to pipe server
+			canvas.toBlob(function(blob){
+				var oReq = new XMLHttpRequest();
+				oReq.open("POST", '/image');
+				oReq.onload = function(e) {
+					if (oReq.status != 200) {
+						return oReq.onerror()
+					}
+					var console = document.querySelector("#ff_console")
+					console.value += oReq.responseText;
+					console.scrollTop = console.scrollHeight;
+					drawNext();
+				};
+				oReq.onerror = function() {
+					if (oReq.responseText) {
+						var console = document.querySelector("#ff_console")
+						console.value += oReq.responseText;
+						console.scrollTop = console.scrollHeight;
+					}
+					alert("Render failed. FFMPEG crashed or something");
+					animating = false;
+				}
+				oReq.send(blob);
+			});
+		} else {
+			// Animate only at 30 fps
+			requestAnimationFrame(function() {
+				requestAnimationFrame(drawNext);
+			});
+		}
+	} else {
+		// Animator indicated that the animation has ended.
+		if (saveToFile){
+			// Also tell the pipe server to finalize ffmpeg and save to file
+			var oReq = new XMLHttpRequest();
+			oReq.open("GET", '/end');
+			oReq.onload = function(e) {
+				if (oReq.status != 200) {
+					return oReq.onerror()
+				}
+				var console = document.querySelector("#ff_console")
+				console.value += oReq.responseText;
+				console.scrollTop = console.scrollHeight;
+				alert("Done.");
+				animating = false;
+			};
+			oReq.onerror = function() {
+				if (oReq.responseText) {
+					var console = document.querySelector("#ff_console")
+					console.value += oReq.responseText;
+					console.scrollTop = console.scrollHeight;
+				}
+				alert("Finalization failed. FFMPEG crashed or something");
+				animating = false;
+			}
+			oReq.send();
+		} else {
+			animating = false;
+		}
+	}
+}
+
+if (!window.Animator) {
+	alert("drawing script not properly initialized.");
+}
+</script>
+</body>
+</html>
